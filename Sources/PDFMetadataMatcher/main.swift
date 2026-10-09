@@ -37,8 +37,11 @@ enum PDFTools {
         let xattrs = try? url.resourceValues(forKeys: [.creationDateKey, .contentModificationDateKey])
         result["Filesystem:Created"] = xattrs?.creationDate?.description ?? ""
         result["Filesystem:Modified"] = xattrs?.contentModificationDate?.description ?? ""
-        let signature = (try? run("pdfsig", [url.path])) ?? "Signature check unavailable"
-        result["Signature:Status"] = signature.contains("Signature #") ? "SIGNED — protected from metadata matching" : "No signature reported"
+        if let signature = try? run("pdfsig", [url.path]) {
+            result["Signature:Status"] = signature.contains("Signature #") ? "SIGNED — protected from metadata matching" : "No signature reported"
+        } else {
+            result["Signature:Status"] = "Unknown — signature check unavailable"
+        }
         result["PDF:StructureCheck"] = (try? run("qpdf", ["--check", url.path]))?.contains("No syntax or stream encoding errors") == true ? "Valid" : "Check unavailable or warnings"
         return result
     }
@@ -46,7 +49,20 @@ enum PDFTools {
         "Author": "PDF:Author",
         "Title": "PDF:Title",
         "Subject": "PDF:Subject",
-        "Keywords": "PDF:Keywords"
+        "Keywords": "PDF:Keywords",
+        "Creator": "PDF:Creator",
+        "Producer": "PDF:Producer",
+        "Created": "PDF:CreateDate",
+        "Modified": "PDF:ModifyDate",
+        "XMP Creator Tool": "XMP-xmp:CreatorTool",
+        "XMP Producer": "XMP-pdf:Producer",
+        "XMP Created": "XMP-xmp:CreateDate",
+        "XMP Modified": "XMP-xmp:ModifyDate",
+        "XMP Metadata Date": "XMP-xmp:MetadataDate",
+        "XMP Format": "XMP-dc:Format",
+        "XMP Description": "XMP-dc:Description",
+        "XMP Rights": "XMP-dc:Rights",
+        "XMP Label": "XMP-xmp:Label"
     ]
 
     static func match(source: URL, destination: URL, values: [String: String]) throws -> URL {
@@ -99,7 +115,14 @@ enum PDFTools {
     @Published var search = ""
     @Published var onlyDifferences = false
 
-    var editableNames: [String] { ["Author", "Title", "Subject", "Keywords"] }
+    var editableNames: [String] {
+        ["Author", "Title", "Subject", "Keywords", "Creator", "Producer",
+         "Created", "Modified", "XMP Creator Tool", "XMP Producer",
+         "XMP Created", "XMP Modified", "XMP Metadata Date", "XMP Format",
+         "XMP Description", "XMP Rights", "XMP Label"]
+    }
+    @Published var sourceEdits: [String: String] = [:]
+    func tagKey(_ name: String) -> String { PDFTools.editableTags[name] ?? "PDF:" + name }
     var sourceValues: [String: String] = [:]
     var destinationValues: [String: String] = [:]
     var isSigned: Bool {
@@ -134,7 +157,10 @@ enum PDFTools {
             let keys = Set(a.keys).union(b.keys).sorted()
             fields = keys.map { Field(id: $0, source: a[$0] ?? "—", destination: b[$0] ?? "—") }
             edits = Dictionary(uniqueKeysWithValues: editableNames.map { name in
-                (name, b["PDF:" + name] ?? "")
+                (name, b[tagKey(name)] ?? "")
+            })
+            sourceEdits = Dictionary(uniqueKeysWithValues: editableNames.map { name in
+                (name, a[tagKey(name)] ?? "")
             })
             message = "Compared \\(fields.count) fields; \\(fields.filter { !$0.matches }.count) differences."
         } catch { message = error.localizedDescription }
@@ -142,9 +168,9 @@ enum PDFTools {
     }
     func matchAll() {
         for name in editableNames {
-            edits[name] = sourceValues["PDF:" + name] ?? ""
+            edits[name] = sourceEdits[name] ?? ""
         }
-        message = "Source values staged. Review them, then choose Save Copy."
+        message = "All supported source fields staged. Review the target values, then Save Copy."
     }
     func save() {
         guard let source, let destination else { return }
@@ -185,7 +211,7 @@ struct ContentView: View {
                     .padding()
                     Divider()
                     HStack {
-                        Text("Editable Metadata").font(.title3.weight(.semibold))
+                        Text("Editable PDF / XMP Metadata").font(.title3.weight(.semibold))
                         Spacer()
                         Button("Match") { model.matchAll() }
                             .disabled(model.isSigned)
@@ -207,9 +233,11 @@ struct ContentView: View {
                                 Text(name).frame(width: 90, alignment: .leading)
                                 VStack(alignment: .leading, spacing: 3) {
                                     Text("Source").font(.caption).foregroundStyle(.secondary)
-                                    Text(model.sourceValues["PDF:" + name] ?? "Not set")
-                                        .textSelection(.enabled)
-                                        .lineLimit(2)
+                                    TextField("Not set", text: Binding(
+                                        get: { model.sourceEdits[name] ?? "" },
+                                        set: { model.sourceEdits[name] = $0 }
+                                    ))
+                                    .disabled(model.isSigned)
                                 }
                                 .frame(maxWidth: .infinity, alignment: .leading)
                                 VStack(alignment: .leading, spacing: 3) {
@@ -225,7 +253,7 @@ struct ContentView: View {
                         }
                     }
                     .formStyle(.grouped)
-                    .frame(height: 310)
+                    .frame(height: 420)
                     Divider()
                     HStack {
                         Text("All Detected Metadata").font(.headline)
