@@ -90,7 +90,7 @@ enum PDFTools {
         var args = ["-overwrite_original"]
         for (name, tag) in editableTags.sorted(by: { $0.key < $1.key }) {
             if let value = values[name] {
-                args.append("-\\(tag)=\\(value)")
+                args.append("-\(tag)=\(value)")
             }
         }
         if args.count > 1 {
@@ -137,7 +137,12 @@ enum PDFTools {
              row.destination.localizedCaseInsensitiveContains(search))
         }
     }
-    func assign(_ url: URL, source isSource: Bool) {\n        guard url.pathExtension.lowercased() == "pdf" else { message = "Only PDF files are supported."; return }\n        if isSource { source = url } else { destination = url }\n        compare()\n    }\n    func choose(source isSource: Bool) {
+    func assign(_ url: URL, source isSource: Bool) {
+        guard url.pathExtension.lowercased() == "pdf" else { message = "Only PDF files are supported."; return }
+        if isSource { source = url } else { destination = url }
+        compare()
+    }
+    func choose(source isSource: Bool) {
         let panel = NSOpenPanel()
         panel.allowedContentTypes = [.pdf]
         panel.allowsMultipleSelection = false
@@ -161,7 +166,7 @@ enum PDFTools {
             sourceEdits = Dictionary(uniqueKeysWithValues: editableNames.map { name in
                 (name, a[tagKey(name)] ?? "")
             })
-            message = "Compared \\(fields.count) fields; \\(fields.filter { !$0.matches }.count) differences."
+            message = "Compared \(fields.count) fields; \(fields.filter { !$0.matches }.count) differences."
         } catch { message = error.localizedDescription }
         busy = false
     }
@@ -176,7 +181,7 @@ enum PDFTools {
         busy = true
         do {
             let output = try PDFTools.match(source: source, destination: destination, values: edits)
-            message = "Saved: \\(output.path)"
+            message = "Saved: \(output.path)"
         } catch { message = error.localizedDescription }
         busy = false
     }
