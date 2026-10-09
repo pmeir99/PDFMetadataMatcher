@@ -42,26 +42,48 @@ enum PDFTools {
         result["PDF:StructureCheck"] = (try? run("qpdf", ["--check", url.path]))?.contains("No syntax or stream encoding errors") == true ? "Valid" : "Check unavailable or warnings"
         return result
     }
-    static func match(source: URL, destination: URL) throws -> URL {
-        let s = try metadata(source), d = try metadata(destination)
-        guard s["Signature:Status"]?.hasPrefix("No signature") == true,
-              d["Signature:Status"]?.hasPrefix("No signature") == true else {
-            throw NSError(domain: "PDFMetadataMatcher", code: 2, userInfo: [NSLocalizedDescriptionKey: "Signed PDFs are comparison-only. A metadata rewrite can invalidate or misrepresent signature coverage."])
+    static let editableTags: [String: String] = [
+        "Author": "PDF:Author",
+        "Title": "PDF:Title",
+        "Subject": "PDF:Subject",
+        "Keywords": "PDF:Keywords"
+    ]
+
+    static func match(source: URL, destination: URL, values: [String: String]) throws -> URL {
+        let a = try metadata(source), b = try metadata(destination)
+        guard a["Signature:Status"]?.hasPrefix("No signature") == true,
+              b["Signature:Status"]?.hasPrefix("No signature") == true else {
+            throw NSError(domain: "PDFMetadataMatcher", code: 2, userInfo: [
+                NSLocalizedDescriptionKey: "Signed PDFs are inspection-only. Editing metadata can invalidate signatures."
+            ])
         }
-        let output = destination.deletingPathExtension().appendingPathExtension("matched.pdf")
-        if FileManager.default.fileExists(atPath: output.path) { throw NSError(domain: "PDFMetadataMatcher", code: 3, userInfo: [NSLocalizedDescriptionKey: "Output already exists: \(output.lastPathComponent). Rename it before retrying."]) }
+        let panel = NSSavePanel()
+        panel.allowedContentTypes = [.pdf]
+        panel.nameFieldStringValue = destination.deletingPathExtension().lastPathComponent + ".matched.pdf"
+        guard panel.runModal() == .OK, let output = panel.url else {
+            throw NSError(domain: "PDFMetadataMatcher", code: 4, userInfo: [
+                NSLocalizedDescriptionKey: "Save cancelled."
+            ])
+        }
+        guard output != destination && output != source else {
+            throw NSError(domain: "PDFMetadataMatcher", code: 5, userInfo: [
+                NSLocalizedDescriptionKey: "Choose a new output path; source and target are preserved."
+            ])
+        }
         try FileManager.default.copyItem(at: destination, to: output)
-        // Only descriptive fields, not signatures, provenance, timestamps or software origin.
-        let tags = ["PDF:Title", "PDF:Subject", "PDF:Keywords", "PDF:Author"]
         var args = ["-overwrite_original"]
-        for tag in tags {
-            if let value = s[tag], !value.isEmpty { args.append("-\(tag)=\(value)") }
+        for (name, tag) in editableTags.sorted(by: { $0.key < $1.key }) {
+            if let value = values[name] {
+                args.append("-\\(tag)=\\(value)")
+            }
         }
         if args.count > 1 {
             args.append(output.path)
-            do { _ = try run("exiftool", args) } catch { try? FileManager.default.removeItem(at: output); throw error }
+            do { _ = try run("exiftool", args) }
+            catch { try? FileManager.default.removeItem(at: output); throw error }
         }
-        _ = try run("qpdf", ["--check", output.path])
+        do { _ = try run("qpdf", ["--check", output.path]) }
+        catch { try? FileManager.default.removeItem(at: output); throw error }
         return output
     }
 }
@@ -70,10 +92,32 @@ enum PDFTools {
     @Published var source: URL?
     @Published var destination: URL?
     @Published var fields: [Field] = []
-    @Published var message = "Select both PDFs to compare."
+    @Published var edits: [String: String] = [:]
+    @Published var message = "Choose a source and a target PDF to begin."
     @Published var busy = false
+    @Published var showAll = false
+    @Published var search = ""
+    @Published var onlyDifferences = false
+
+    var editableNames: [String] { ["Author", "Title", "Subject", "Keywords"] }
+    var sourceValues: [String: String] = [:]
+    var destinationValues: [String: String] = [:]
+    var isSigned: Bool {
+        (sourceValues["Signature:Status"] ?? "").contains("SIGNED") ||
+        (destinationValues["Signature:Status"] ?? "").contains("SIGNED")
+    }
+    var visibleFields: [Field] {
+        fields.filter { row in
+            (!onlyDifferences || !row.matches) &&
+            (search.isEmpty || row.id.localizedCaseInsensitiveContains(search) ||
+             row.source.localizedCaseInsensitiveContains(search) ||
+             row.destination.localizedCaseInsensitiveContains(search))
+        }
+    }
     func choose(source isSource: Bool) {
-        let panel = NSOpenPanel(); panel.allowedContentTypes = [.pdf]; panel.allowsMultipleSelection = false
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = [.pdf]
+        panel.allowsMultipleSelection = false
         if panel.runModal() == .OK, let url = panel.url {
             if isSource { source = url } else { destination = url }
             compare()
@@ -82,62 +126,165 @@ enum PDFTools {
     func compare() {
         guard let source, let destination else { return }
         busy = true
-        DispatchQueue.global(qos: .userInitiated).async {
-            do {
-                let a = try PDFTools.metadata(source), b = try PDFTools.metadata(destination)
-                let keys = Set(a.keys).union(b.keys).sorted()
-                let rows = keys.map { Field(id: $0, source: a[$0] ?? "—", destination: b[$0] ?? "—") }
-                DispatchQueue.main.async { self.fields = rows; self.message = "Compared \(rows.count) fields; \(rows.filter { !$0.matches }.count) differences."; self.busy = false }
-            } catch {
-                DispatchQueue.main.async { self.message = error.localizedDescription; self.busy = false }
-            }
-        }
+        do {
+            let a = try PDFTools.metadata(source)
+            let b = try PDFTools.metadata(destination)
+            sourceValues = a
+            destinationValues = b
+            let keys = Set(a.keys).union(b.keys).sorted()
+            fields = keys.map { Field(id: $0, source: a[$0] ?? "—", destination: b[$0] ?? "—") }
+            edits = Dictionary(uniqueKeysWithValues: editableNames.map { name in
+                (name, b["PDF:" + name] ?? "")
+            })
+            message = "Compared \\(fields.count) fields; \\(fields.filter { !$0.matches }.count) differences."
+        } catch { message = error.localizedDescription }
+        busy = false
     }
-    func match() {
+    func matchAll() {
+        for name in editableNames {
+            edits[name] = sourceValues["PDF:" + name] ?? ""
+        }
+        message = "Source values staged. Review them, then choose Save Copy."
+    }
+    func save() {
         guard let source, let destination else { return }
         busy = true
-        DispatchQueue.global(qos: .userInitiated).async {
-            do {
-                let url = try PDFTools.match(source: source, destination: destination)
-                DispatchQueue.main.async { self.message = "Created \(url.path)"; self.busy = false }
-            } catch {
-                DispatchQueue.main.async { self.message = error.localizedDescription; self.busy = false }
-            }
-        }
+        do {
+            let output = try PDFTools.match(source: source, destination: destination, values: edits)
+            message = "Saved: \\(output.path)"
+        } catch { message = error.localizedDescription }
+        busy = false
     }
 }
 
 struct ContentView: View {
     @StateObject private var model = Model()
     var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            Text("PDF Metadata Matcher").font(.largeTitle.bold())
-            HStack {
-                Button("Choose Source PDF") { model.choose(source: true) }
-                Text(model.source?.lastPathComponent ?? "No source selected").lineLimit(1)
+        VStack(spacing: 0) {
+            if model.source == nil || model.destination == nil {
+                VStack(spacing: 20) {
+                    Image(systemName: "doc.on.doc")
+                        .font(.system(size: 54, weight: .ultraLight))
+                        .foregroundStyle(.secondary)
+                    Text("Compare PDF Metadata").font(.largeTitle.weight(.semibold))
+                    Text("Choose a source PDF and a target PDF to inspect their metadata.")
+                        .foregroundStyle(.secondary)
+                    HStack(spacing: 18) {
+                        filePicker("Source PDF", url: model.source) { model.choose(source: true) }
+                        filePicker("Target PDF", url: model.destination) { model.choose(source: false) }
+                    }
+                    .frame(maxWidth: 760)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                VStack(spacing: 0) {
+                    HStack(spacing: 16) {
+                        filePicker("Source", url: model.source) { model.choose(source: true) }
+                        filePicker("Target", url: model.destination) { model.choose(source: false) }
+                    }
+                    .padding()
+                    Divider()
+                    HStack {
+                        Text("Editable Metadata").font(.title3.weight(.semibold))
+                        Spacer()
+                        Button("Match") { model.matchAll() }
+                            .disabled(model.isSigned)
+                        Button("Save Copy") { model.save() }
+                            .buttonStyle(.borderedProminent)
+                            .disabled(model.busy || model.isSigned)
+                    }
+                    .padding(.horizontal)
+                    .padding(.top, 14)
+                    if model.isSigned {
+                        Label("A digital signature was detected. This document is inspection-only.", systemImage: "signature")
+                            .foregroundStyle(.orange)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding()
+                    }
+                    Form {
+                        ForEach(model.editableNames, id: \.self) { name in
+                            HStack(spacing: 16) {
+                                Text(name).frame(width: 90, alignment: .leading)
+                                VStack(alignment: .leading, spacing: 3) {
+                                    Text("Source").font(.caption).foregroundStyle(.secondary)
+                                    Text(model.sourceValues["PDF:" + name] ?? "Not set")
+                                        .textSelection(.enabled)
+                                        .lineLimit(2)
+                                }
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                VStack(alignment: .leading, spacing: 3) {
+                                    Text("Target").font(.caption).foregroundStyle(.secondary)
+                                    TextField(name, text: Binding(
+                                        get: { model.edits[name] ?? "" },
+                                        set: { model.edits[name] = $0 }
+                                    ))
+                                    .disabled(model.isSigned)
+                                }
+                                .frame(maxWidth: .infinity)
+                            }
+                        }
+                    }
+                    .formStyle(.grouped)
+                    .frame(height: 310)
+                    Divider()
+                    HStack {
+                        Text("All Detected Metadata").font(.headline)
+                        Spacer()
+                        Toggle("Differences only", isOn: $model.onlyDifferences).toggleStyle(.checkbox)
+                        TextField("Search fields", text: $model.search).frame(width: 210)
+                    }
+                    .padding()
+                    Table(model.visibleFields) {
+                        TableColumn("Field", value: \.id).width(min: 170)
+                        TableColumn("Source", value: \.source).width(min: 220)
+                        TableColumn("Target", value: \.destination).width(min: 220)
+                        TableColumn("Match") { field in
+                            Image(systemName: field.matches ? "checkmark.circle" : "circle.dotted")
+                                .foregroundStyle(field.matches ? .green : .secondary)
+                        }.width(60)
+                    }
+                }
             }
+            Divider()
             HStack {
-                Button("Choose Destination PDF") { model.choose(source: false) }
-                Text(model.destination?.lastPathComponent ?? "No destination selected").lineLimit(1)
-            }
-            HStack {
-                Button("Compare") { model.compare() }.disabled(model.source == nil || model.destination == nil || model.busy)
-                Button("Match Metadata (Unsigned PDFs)") { model.match() }.disabled(model.source == nil || model.destination == nil || model.busy)
+                Text(model.message).lineLimit(2).textSelection(.enabled)
+                Spacer()
                 if model.busy { ProgressView().controlSize(.small) }
             }
-            Text(model.message).font(.caption).textSelection(.enabled)
-            Table(model.fields) {
-                TableColumn("Field", value: \.id).width(min: 180)
-                TableColumn("Source", value: \.source).width(min: 240)
-                TableColumn("Destination", value: \.destination).width(min: 240)
-                TableColumn("Match") { field in Text(field.matches ? "✓" : "≠") }.width(55)
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            .padding(10)
+        }
+        .frame(minWidth: 940, minHeight: 680)
+        .toolbar {
+            ToolbarItemGroup {
+                Button("Source", systemImage: "doc") { model.choose(source: true) }
+                Button("Target", systemImage: "doc.badge.plus") { model.choose(source: false) }
+                Button("Refresh", systemImage: "arrow.clockwise") { model.compare() }
+                    .disabled(model.source == nil || model.destination == nil)
             }
         }
-        .padding(20)
-        .frame(minWidth: 900, minHeight: 600)
+    }
+
+    func filePicker(_ title: String, url: URL?, action: @escaping () -> Void) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(title).font(.headline)
+            Button(action: action) {
+                Label(url?.lastPathComponent ?? "Choose PDF…", systemImage: "doc.text")
+                    .lineLimit(1)
+                    .frame(maxWidth: .infinity, minHeight: 48, alignment: .leading)
+            }
+            .buttonStyle(.bordered)
+        }
+        .frame(maxWidth: .infinity)
     }
 }
 
 @main struct PDFMetadataMatcherApp: App {
-    var body: some Scene { WindowGroup { ContentView() } }
+    var body: some Scene {
+        WindowGroup { ContentView() }
+        .commands {
+            CommandGroup(replacing: .newItem) { }
+        }
+    }
 }
