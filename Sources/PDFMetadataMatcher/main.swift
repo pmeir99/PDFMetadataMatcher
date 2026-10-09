@@ -137,13 +137,12 @@ enum PDFTools {
              row.destination.localizedCaseInsensitiveContains(search))
         }
     }
-    func choose(source isSource: Bool) {
+    func assign(_ url: URL, source isSource: Bool) {\n        guard url.pathExtension.lowercased() == "pdf" else { message = "Only PDF files are supported."; return }\n        if isSource { source = url } else { destination = url }\n        compare()\n    }\n    func choose(source isSource: Bool) {
         let panel = NSOpenPanel()
         panel.allowedContentTypes = [.pdf]
         panel.allowsMultipleSelection = false
         if panel.runModal() == .OK, let url = panel.url {
-            if isSource { source = url } else { destination = url }
-            compare()
+            assign(url, source: isSource)
         }
     }
     func compare() {
@@ -183,136 +182,192 @@ enum PDFTools {
     }
 }
 
-struct ContentView: View {
-    @StateObject private var model = Model()
+struct PDFPane: View {
+    @ObservedObject var model: Model
+    let isSource: Bool
+    @State private var targeted = false
+
+    private var url: URL? { isSource ? model.source : model.destination }
+    private var title: String { isSource ? "Source" : "Target" }
+
     var body: some View {
         VStack(spacing: 0) {
-            if model.source == nil || model.destination == nil {
-                VStack(spacing: 20) {
-                    Image(systemName: "doc.on.doc")
-                        .font(.system(size: 54, weight: .ultraLight))
-                        .foregroundStyle(.secondary)
-                    Text("Compare PDF Metadata").font(.largeTitle.weight(.semibold))
-                    Text("Choose a source PDF and a target PDF to inspect their metadata.")
-                        .foregroundStyle(.secondary)
-                    HStack(spacing: 18) {
-                        filePicker("Source PDF", url: model.source) { model.choose(source: true) }
-                        filePicker("Target PDF", url: model.destination) { model.choose(source: false) }
+            HStack(spacing: 10) {
+                Image(systemName: isSource ? "doc.text.magnifyingglass" : "square.and.pencil")
+                    .foregroundStyle(.secondary)
+                Text(title).font(.title2.weight(.semibold))
+                Spacer()
+                Button("Choose PDF…") { model.choose(source: isSource) }
+            }
+            .padding(.horizontal, 20)
+            .padding(.vertical, 16)
+
+            Button { model.choose(source: isSource) } label: {
+                HStack(spacing: 12) {
+                    Image(systemName: "doc.richtext").font(.title2)
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(url?.lastPathComponent ?? "Drop a PDF here")
+                            .font(.headline).lineLimit(2)
+                        Text(url == nil ? "Or click to browse" : url!.path)
+                            .font(.caption).foregroundStyle(.secondary).lineLimit(1)
                     }
-                    .frame(maxWidth: 760)
+                    Spacer()
+                    Image(systemName: "arrow.down.doc").foregroundStyle(.secondary)
                 }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-            } else {
-                VStack(spacing: 0) {
-                    HStack(spacing: 16) {
-                        filePicker("Source", url: model.source) { model.choose(source: true) }
-                        filePicker("Target", url: model.destination) { model.choose(source: false) }
-                    }
-                    .padding()
-                    Divider()
-                    HStack {
-                        Text("Editable PDF / XMP Metadata").font(.title3.weight(.semibold))
-                        Spacer()
-                        Button("Match") { model.matchAll() }
-                            .disabled(model.isSigned)
-                        Button("Save Copy") { model.save() }
-                            .buttonStyle(.borderedProminent)
-                            .disabled(model.busy || model.isSigned)
-                    }
-                    .padding(.horizontal)
-                    .padding(.top, 14)
-                    if model.isSigned {
-                        Label("A digital signature was detected. This document is inspection-only.", systemImage: "signature")
-                            .foregroundStyle(.orange)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .padding()
-                    }
-                    Form {
-                        ForEach(model.editableNames, id: \.self) { name in
-                            HStack(spacing: 16) {
-                                Text(name).frame(width: 90, alignment: .leading)
-                                VStack(alignment: .leading, spacing: 3) {
-                                    Text("Source").font(.caption).foregroundStyle(.secondary)
-                                    TextField("Not set", text: Binding(
-                                        get: { model.sourceEdits[name] ?? "" },
-                                        set: { model.sourceEdits[name] = $0 }
-                                    ))
-                                    .disabled(model.isSigned)
+                .padding(18)
+                .frame(maxWidth: .infinity, minHeight: 92)
+                .contentShape(RoundedRectangle(cornerRadius: 18))
+            }
+            .buttonStyle(.plain)
+            .modifier(GlassPanel(active: targeted))
+            .padding(.horizontal, 18)
+            .onDrop(of: [UTType.fileURL.identifier], isTargeted: $targeted) { providers in
+                guard let provider = providers.first else { return false }
+                _ = provider.loadObject(ofClass: URL.self) { value, _ in
+                    guard let url = value else { return }
+                    DispatchQueue.main.async { model.assign(url, source: isSource) }
+                }
+                return true
+            }
+
+            HStack {
+                Text("EDITABLE FIELDS")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                Spacer()
+                if url != nil { Text("\(model.editableNames.count) fields").font(.caption).foregroundStyle(.secondary) }
+            }
+            .padding(.horizontal, 22)
+            .padding(.top, 24)
+            .padding(.bottom, 8)
+
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 15) {
+                    ForEach(model.editableNames, id: \.self) { name in
+                        VStack(alignment: .leading, spacing: 5) {
+                            Text(name).font(.subheadline.weight(.medium))
+                            TextField("Not specified", text: Binding(
+                                get: { isSource ? (model.sourceEdits[name] ?? "") : (model.edits[name] ?? "") },
+                                set: { newValue in
+                                    if isSource { model.sourceEdits[name] = newValue }
+                                    else { model.edits[name] = newValue }
                                 }
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                                VStack(alignment: .leading, spacing: 3) {
-                                    Text("Target").font(.caption).foregroundStyle(.secondary)
-                                    TextField(name, text: Binding(
-                                        get: { model.edits[name] ?? "" },
-                                        set: { model.edits[name] = $0 }
-                                    ))
-                                    .disabled(model.isSigned)
-                                }
-                                .frame(maxWidth: .infinity)
-                            }
+                            ))
+                            .textFieldStyle(.roundedBorder)
+                            .disabled(url == nil || model.isSigned)
                         }
+                        .padding(.horizontal, 20)
                     }
-                    .formStyle(.grouped)
-                    .frame(height: 420)
-                    Divider()
+                }
+                .padding(.vertical, 12)
+            }
+        }
+        .frame(minWidth: 340, maxWidth: .infinity, maxHeight: .infinity)
+    }
+}
+
+struct GlassPanel: ViewModifier {
+    let active: Bool
+    func body(content: Content) -> some View {
+        if #available(macOS 26.0, *) {
+            content
+                .glassEffect(.regular, in: RoundedRectangle(cornerRadius: 18))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 18)
+                        .strokeBorder(active ? Color.accentColor : Color.clear, lineWidth: 2)
+                }
+        } else {
+            content
+                .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 18))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 18)
+                        .strokeBorder(active ? Color.accentColor : Color.secondary.opacity(0.15), lineWidth: active ? 2 : 1)
+                }
+        }
+    }
+}
+
+struct ContentView: View {
+    @StateObject private var model = Model()
+    @State private var showInspector = false
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HSplitView {
+                PDFPane(model: model, isSource: true)
+                PDFPane(model: model, isSource: false)
+            }
+            if showInspector && model.source != nil && model.destination != nil {
+                Divider()
+                VStack(spacing: 8) {
                     HStack {
-                        Text("All Detected Metadata").font(.headline)
+                        Text("Complete Metadata Comparison").font(.headline)
                         Spacer()
                         Toggle("Differences only", isOn: $model.onlyDifferences).toggleStyle(.checkbox)
-                        TextField("Search fields", text: $model.search).frame(width: 210)
+                        TextField("Search", text: $model.search).frame(width: 220)
                     }
-                    .padding()
                     Table(model.visibleFields) {
                         TableColumn("Field", value: \.id).width(min: 170)
                         TableColumn("Source", value: \.source).width(min: 220)
                         TableColumn("Target", value: \.destination).width(min: 220)
-                        TableColumn("Match") { field in
-                            Image(systemName: field.matches ? "checkmark.circle" : "circle.dotted")
-                                .foregroundColor(field.matches ? .green : .secondary)
-                        }.width(60)
                     }
                 }
+                .padding(12)
+                .frame(minHeight: 210, idealHeight: 300)
             }
             Divider()
-            HStack {
-                Text(model.message).lineLimit(2).textSelection(.enabled)
+            HStack(spacing: 12) {
+                Image(systemName: model.isSigned ? "lock.shield" : "info.circle")
+                    .foregroundStyle(model.isSigned ? .orange : .secondary)
+                Text(model.isSigned ? "Signed PDF: inspection only. Editing could invalidate signatures." : model.message)
+                    .lineLimit(2).textSelection(.enabled)
                 Spacer()
                 if model.busy { ProgressView().controlSize(.small) }
             }
             .font(.caption)
-            .foregroundStyle(.secondary)
-            .padding(10)
+            .padding(.horizontal, 18)
+            .padding(.vertical, 10)
         }
-        .frame(minWidth: 940, minHeight: 680)
+        .frame(minWidth: 920, minHeight: 640)
         .toolbar {
-            ToolbarItemGroup {
-                Button("Source", systemImage: "doc") { model.choose(source: true) }
-                Button("Target", systemImage: "doc.badge.plus") { model.choose(source: false) }
-                Button("Refresh", systemImage: "arrow.clockwise") { model.compare() }
-                    .disabled(model.source == nil || model.destination == nil)
-            }
-        }
-    }
+            ToolbarItemGroup(placement: .primaryAction) {
+                Button {
+                    model.matchAll()
+                } label: {
+                    Label("Match All", systemImage: "arrow.right")
+                }
+                .disabled(model.source == nil || model.destination == nil || model.isSigned)
 
-    func filePicker(_ title: String, url: URL?, action: @escaping () -> Void) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text(title).font(.headline)
-            Button(action: action) {
-                Label(url?.lastPathComponent ?? "Choose PDF…", systemImage: "doc.text")
-                    .lineLimit(1)
-                    .frame(maxWidth: .infinity, minHeight: 48, alignment: .leading)
+                Button {
+                    model.save()
+                } label: {
+                    Label("Save Copy", systemImage: "square.and.arrow.down")
+                }
+                .disabled(model.source == nil || model.destination == nil || model.isSigned || model.busy)
+                .buttonStyle(.borderedProminent)
+
+                Button {
+                    showInspector.toggle()
+                } label: {
+                    Label("Inspector", systemImage: "sidebar.right")
+                }
+                .disabled(model.source == nil || model.destination == nil)
+
+                Button {
+                    model.compare()
+                } label: {
+                    Label("Refresh", systemImage: "arrow.clockwise")
+                }
+                .disabled(model.source == nil || model.destination == nil)
             }
-            .buttonStyle(.bordered)
         }
-        .frame(maxWidth: .infinity)
     }
 }
 
 @main struct PDFMetadataMatcherApp: App {
     var body: some Scene {
         WindowGroup { ContentView() }
-        .commands {
-            CommandGroup(replacing: .newItem) { }
-        }
+            .windowStyle(.automatic)
+            .commands { CommandGroup(replacing: .newItem) { } }
     }
 }
