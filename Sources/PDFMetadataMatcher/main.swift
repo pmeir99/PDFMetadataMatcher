@@ -240,7 +240,7 @@ struct ContentView: View {
                         TableColumn("Target", value: \.destination).width(min: 220)
                         TableColumn("Match") { field in
                             Image(systemName: field.matches ? "checkmark.circle" : "circle.dotted")
-                                .foregroundStyle(field.matches ? .green : .secondary)
+                                .foregroundColor(field.matches ? .green : .secondary)
                         }.width(60)
                     }
                 }
