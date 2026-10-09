@@ -318,7 +318,7 @@ struct ContentView: View {
             Divider()
             HStack(spacing: 12) {
                 Image(systemName: model.isSigned ? "lock.shield" : "info.circle")
-                    .foregroundStyle(model.isSigned ? .orange : .secondary)
+                    .foregroundColor(model.isSigned ? .orange : .secondary)
                 Text(model.isSigned ? "Signed PDF: inspection only. Editing could invalidate signatures." : model.message)
                     .lineLimit(2).textSelection(.enabled)
                 Spacer()
